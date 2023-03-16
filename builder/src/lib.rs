@@ -51,21 +51,10 @@ fn get_build_method_code(data: &syn::Data) -> proc_macro2::TokenStream {
     match *data {
         Data::Struct(ref data) => match data.fields {
             Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    match field_kind(f) {
-                        FieldKind::Option(_) | FieldKind::Vec(_) => {
-                            quote_spanned! {f.span()=>
-                                #name : ::std::mem::take(&mut self.#name)
-                            }
-                        }
-                        FieldKind::Other => {
-                            quote_spanned! {f.span()=>
-                                #name : self.#name.take().ok_or(std::sync::mpsc::RecvError)?
-                            }
-                        }
-                    }
-                });
+                let recurse = fields
+                    .named
+                    .iter()
+                    .map(|f| BuilderFieldInfo(f).build_field_init_syntax());
                 quote! {
                     #( #recurse ),*
                 }
@@ -101,49 +90,6 @@ enum FieldAttrKind<'a> {
     Plural { each: &'a str },
 }
 
-/*
-fn field_attr_kind<'a>(f: &'a syn::Field) -> FieldAttrKind<'a> {
-    let builder_ident = Ident::new("builder", proc_macro2::Span::call_site());
-    for a in &f.attrs {
-        if !matches!(a.style, syn::AttrStyle::Outer) {
-            continue;
-        }
-
-        let segments = &a.path.segments;
-        if segments.len() == 1 && segments.first().unwrap() == &builder_ident {
-            // let tokens = &mut a.tokens;
-            // tokens.parse()
-
-            return FieldAttrKind::Plural(a.tokens);
-        }
-    }
-
-    FieldAttrKind::Generic
-}
-*/
-
-fn field_kind<'a>(f: &'a syn::Field) -> FieldKind<'a> {
-    match &f.ty {
-        syn::Type::Path(path) => {
-            let left = &path.path.segments.first().unwrap().ident;
-
-            let Some(param) = extract_path_generic_param(path) else { return FieldKind::Other; };
-
-            let right = Ident::new("Option", proc_macro2::Span::call_site());
-            if left == &right {
-                return FieldKind::Option(param);
-            }
-            let right = Ident::new("Vec", proc_macro2::Span::call_site());
-            if left == &right {
-                return FieldKind::Vec(param);
-            }
-
-            FieldKind::Other
-        }
-        _ => todo!("Not supported field type"),
-    }
-}
-
 fn extract_path_generic_param(path: &syn::TypePath) -> Option<&syn::Type> {
     match &path.path.segments[0].arguments {
         PathArguments::AngleBracketed(a) => {
@@ -161,87 +107,10 @@ fn get_builder_methods(data: &syn::Data) -> proc_macro2::TokenStream {
     match *data {
         Data::Struct(ref data) => match data.fields {
             Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let name = f.ident.as_ref().unwrap();
-                    let ty = &f.ty;
-                    match field_kind(&f) {
-                        FieldKind::Other => {
-                            quote_spanned! {f.span()=>
-                                fn #name(&mut self, value: #ty) -> &mut Self {
-                                    self.#name = Some(value);
-                                    self
-                                }
-                            }
-                        }
-                        FieldKind::Option(unwrapped_ty) => {
-                            quote_spanned! {f.span()=>
-                                fn #name(&mut self, value: #unwrapped_ty) -> &mut Self {
-                                    self.#name = Some(value);
-                                    self
-                                }
-                            }
-                        }
-                        FieldKind::Vec(unwrapped_ty) => {
-                            /*
-                             * [
-                             *   Attribute {
-                             *       pound_token: Pound,
-                             *       style: Outer,
-                             *       bracket_token: Bracket,
-                             *       path: Path {
-                             *           leading_colon: None,
-                             *           segments: [
-                             *               PathSegment {
-                             *                   ident: Ident {
-                             *                       ident: "builder",
-                             *                       span: #0 bytes(1468..1475) },
-                             *                       arguments: None
-                             *               }
-                             *           ]
-                             *       },
-                             *       tokens: TokenStream [
-                             *           Group {
-                             *               delimiter: Parenthesis,
-                             *               stream: TokenStream [
-                             *                   Ident { ident: "each", span: #0 bytes(1476..1480) },
-                             *                   Punct { ch: '=', spacing: Alone, span: #0 bytes(1481..1482) },
-                             *                   Literal { kind: Str, symbol: "arg", suffix: None, span: #0 bytes(1483..1488) }
-                             *               ],
-                             *               span: #0 bytes(1475..1489)
-                             *           }
-                             *       ]
-                             *   }
-                             * ]; *
-                             */
-
-                            if let Some(a) = get_field_builder_attr(f) {
-                                let method_name = Ident::new(&a.each, f.span());
-
-                                quote_spanned! {f.span()=>
-                                    fn #method_name(&mut self, value: #unwrapped_ty) -> &mut Self {
-                                        self.#name.push(value);
-                                        self
-                                    }
-                                }
-                            } else {
-                                quote_spanned! {f.span()=>
-                                    fn #name(&mut self, value: #ty) -> &mut Self {
-                                        self.#name = value;
-                                        self
-                                    }
-                                }
-                            }
-
-                            /*
-                            panic!(
-                                "attrs = {:?}\nbuilder_attr={:?}",
-                                f.attrs,
-                                get_field_builder_attr(f)
-                            );
-                            */
-                        }
-                    }
-                });
+                let recurse = fields
+                    .named
+                    .iter()
+                    .map(|f| BuilderFieldInfo(f).builder_method_syntax());
                 quote! {
                     #(
                     #recurse
@@ -279,104 +148,168 @@ struct BuilderFieldAttr {
     each: String,
 }
 
-fn get_field_builder_attr(f: &syn::Field) -> Option<BuilderFieldAttr> {
-    for attr in &f.attrs {
-        let attr_name = attr.path.get_ident().map(|s| s.to_string());
-        if attr_name != Some("builder".to_owned()) {
-            continue;
+struct BuilderFieldInfo<'a>(&'a syn::Field);
+
+impl<'a> BuilderFieldInfo<'a> {
+    pub fn kind(&self) -> FieldKind<'a> {
+        let f = self.0;
+        match &f.ty {
+            syn::Type::Path(path) => {
+                let left = &path.path.segments.first().unwrap().ident;
+
+                let Some(param) = extract_path_generic_param(path) else { return FieldKind::Other; };
+
+                let right = Ident::new("Option", proc_macro2::Span::call_site());
+                if left == &right {
+                    return FieldKind::Option(param);
+                }
+                let right = Ident::new("Vec", proc_macro2::Span::call_site());
+                if left == &right {
+                    return FieldKind::Vec(param);
+                }
+
+                FieldKind::Other
+            }
+            _ => todo!("Not supported field type"),
         }
-
-        let Some(meta) = attr.parse_meta().ok() else { continue; };
-        // panic!("parse_meta = {meta:?}");
-
-        // List(MetaList({
-        //      path: Path {
-        //           leading_colon: None,
-        //           segments: [
-        //               PathSegment {
-        //                   ident: Ident { ident: "builder", span: #0 bytes(1468..1475) },
-        //                   arguments: None
-        //               }
-        //           ]
-        //      },
-        //      paren_token: Paren,
-        //      nested: [
-        //          Meta(NameValue(
-        //              MetaNameValue {
-        //                  path: Path {
-        //                      leading_colon: None,
-        //                      segments: [
-        //                          PathSegment {
-        //                              ident: Ident {
-        //                                  ident: "each",
-        //                                  span: #0 bytes(1476..1480)
-        //                              },
-        //                              arguments: None
-        //                          }
-        //                      ]
-        //                  },
-        //                  eq_token: Eq,
-        //                  lit: Str(LitStr { token: "arg" })
-        //             }
-        //         ))
-        //     ]
-        //}))
-        // panic!("here");
-        let syn::Meta::List(meta_list) = meta else { continue; };
-        let Some(attr_name) = meta_list.path.get_ident() else { continue; };
-        if attr_name.to_string() != "builder" {
-            continue;
-        }
-
-        let Some(syn::NestedMeta::Meta(syn::Meta::NameValue(name_value))) = meta_list.nested.first() else { continue; };
-        let Some(name) = name_value.path.get_ident() else { continue; };
-        if name.to_string() != "each" {
-            continue;
-        }
-        let syn::Lit::Str(s) = &name_value.lit else { continue; };
-
-        // panic!("name,value = {name:?}, {value:?}");
-        return Some(BuilderFieldAttr { each: s.value() });
     }
-    None
-}
 
-/*
-fn singular_name(ident: &Ident) -> Ident {
-    let name = ident.to_string();
-    let result_name = name.trim_end_matches("es");
-    let result_name = result_name.trim_end_matches("s");
-    let result = Ident::new(result_name, ident.span());
+    pub fn builder_attr(&self) -> Option<BuilderFieldAttr> {
+        let f: &syn::Field = self.0;
+        for attr in &f.attrs {
+            let attr_name = attr.path.get_ident().map(|s| s.to_string());
+            if attr_name != Some("builder".to_owned()) {
+                continue;
+            }
 
-    result
+            let Some(meta) = attr.parse_meta().ok() else { continue; };
+            let syn::Meta::List(meta_list) = meta else { continue; };
+            let Some(attr_name) = meta_list.path.get_ident() else { continue; };
+            if attr_name.to_string() != "builder" {
+                continue;
+            }
+
+            let Some(syn::NestedMeta::Meta(syn::Meta::NameValue(name_value))) = meta_list.nested.first() else { continue; };
+            let Some(name) = name_value.path.get_ident() else { continue; };
+            if name.to_string() != "each" {
+                continue;
+            }
+            let syn::Lit::Str(s) = &name_value.lit else { continue; };
+
+            return Some(BuilderFieldAttr { each: s.value() });
+        }
+        None
+    }
+
+    pub fn field_init_syntax(&self) -> proc_macro2::TokenStream {
+        let f = self.0;
+        let name = &f.ident;
+        match BuilderFieldInfo(f).kind() {
+            FieldKind::Vec(_) => {
+                quote_spanned! {f.span()=>
+                    #name : Vec::new()
+                }
+            }
+            _ => {
+                quote_spanned! {f.span()=>
+                    #name : None
+                }
+            }
+        }
+    }
+
+    pub fn field_def_syntax(&self) -> proc_macro2::TokenStream {
+        let f = self.0;
+        let name = &f.ident;
+        let ty = &f.ty;
+        match BuilderFieldInfo(f).kind() {
+            FieldKind::Other => {
+                quote_spanned! {f.span()=>
+                    #name : Option<#ty>,
+                }
+            }
+            FieldKind::Option(_) => {
+                quote_spanned! {f.span()=>
+                    #name : #ty,
+                }
+            }
+            FieldKind::Vec(_) => {
+                quote_spanned! {f.span()=>
+                    #name : #ty,
+                }
+            }
+        }
+    }
+
+    pub fn build_field_init_syntax(&self) -> proc_macro2::TokenStream {
+        let f = self.0;
+        let name = &f.ident;
+        match BuilderFieldInfo(f).kind() {
+            FieldKind::Option(_) | FieldKind::Vec(_) => {
+                quote_spanned! {f.span()=>
+                    #name : ::std::mem::take(&mut self.#name)
+                }
+            }
+            FieldKind::Other => {
+                quote_spanned! {f.span()=>
+                    #name : self.#name.take().ok_or(std::sync::mpsc::RecvError)?
+                }
+            }
+        }
+    }
+
+    pub fn builder_method_syntax(&self) -> proc_macro2::TokenStream {
+        let f = self.0;
+        let name = f.ident.as_ref().unwrap();
+        let ty = &f.ty;
+        match BuilderFieldInfo(f).kind() {
+            FieldKind::Other => {
+                quote_spanned! {f.span()=>
+                    fn #name(&mut self, value: #ty) -> &mut Self {
+                        self.#name = Some(value);
+                        self
+                    }
+                }
+            }
+            FieldKind::Option(unwrapped_ty) => {
+                quote_spanned! {f.span()=>
+                    fn #name(&mut self, value: #unwrapped_ty) -> &mut Self {
+                        self.#name = Some(value);
+                        self
+                    }
+                }
+            }
+            FieldKind::Vec(unwrapped_ty) => {
+                if let Some(a) = BuilderFieldInfo(f).builder_attr() {
+                    let method_name = Ident::new(&a.each, f.span());
+
+                    quote_spanned! {f.span()=>
+                        fn #method_name(&mut self, value: #unwrapped_ty) -> &mut Self {
+                            self.#name.push(value);
+                            self
+                        }
+                    }
+                } else {
+                    quote_spanned! {f.span()=>
+                        fn #name(&mut self, value: #ty) -> &mut Self {
+                            self.#name = value;
+                            self
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
-*/
 
 fn get_field_defs(data: &syn::Data) -> proc_macro2::TokenStream {
     match *data {
         Data::Struct(ref data) => match data.fields {
             Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    let ty = &f.ty;
-                    match field_kind(f) {
-                        FieldKind::Other => {
-                            quote_spanned! {f.span()=>
-                                #name : Option<#ty>,
-                            }
-                        }
-                        FieldKind::Option(_) => {
-                            quote_spanned! {f.span()=>
-                                #name : #ty,
-                            }
-                        }
-                        FieldKind::Vec(_) => {
-                            quote_spanned! {f.span()=>
-                                #name : #ty,
-                            }
-                        }
-                    }
-                });
+                let recurse = fields
+                    .named
+                    .iter()
+                    .map(|f| BuilderFieldInfo(f).field_def_syntax());
                 quote! {
                     #(#recurse)*
                 }
@@ -404,21 +337,10 @@ fn get_field_inits(data: &syn::Data) -> proc_macro2::TokenStream {
     match *data {
         Data::Struct(ref data) => match data.fields {
             Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    match field_kind(f) {
-                        FieldKind::Vec(_) => {
-                            quote_spanned! {f.span()=>
-                                #name : Vec::new()
-                            }
-                        }
-                        _ => {
-                            quote_spanned! {f.span()=>
-                                #name : None
-                            }
-                        }
-                    }
-                });
+                let recurse = fields
+                    .named
+                    .iter()
+                    .map(|f| BuilderFieldInfo(f).field_init_syntax());
                 quote! {
                     #(#recurse),*
                 }
