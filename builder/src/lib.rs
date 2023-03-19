@@ -35,7 +35,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         impl #builder_name {
             #builder_methods
 
-            fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+            fn build(&mut self) -> ::std::result::Result<#name, ::std::boxed::Box<dyn ::std::error::Error>> {
                 Ok(#name {
                     #build_method_code
                 })
@@ -224,7 +224,7 @@ impl<'a> BuilderFieldInfo<'a> {
         match BuilderFieldInfo(f).kind() {
             FieldKind::Other => {
                 quote_spanned! {f.span()=>
-                    #name : Option<#ty>,
+                    #name : ::std::option::Option<#ty>,
                 }
             }
             FieldKind::Option(_) => {
@@ -321,7 +321,7 @@ fn get_field_defs(data: &syn::Data) -> proc_macro2::TokenStream {
                 let recurse = fields.unnamed.iter().enumerate().map(|(_i, f)| {
                     let ty = &f.ty;
                     quote_spanned! {f.span()=>
-                        Option<#ty>
+                        ::std::option::Option<#ty>
                     }
                 });
                 quote! {
@@ -352,7 +352,7 @@ fn get_field_inits(data: &syn::Data) -> proc_macro2::TokenStream {
                 let recurse = fields.unnamed.iter().enumerate().map(|(_i, f)| {
                     let ty = &f.ty;
                     quote_spanned! {f.span()=>
-                        Option<#ty>
+                        ::std::option::Option<#ty>
                     }
                 });
                 quote! {
