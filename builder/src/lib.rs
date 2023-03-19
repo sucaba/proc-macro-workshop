@@ -9,6 +9,7 @@ use syn::{
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    // panic!("{:?}", input);
 
     let name = input.ident;
     let builder_name = format_ident!("{}{}", name, "Builder");
@@ -83,11 +84,6 @@ enum FieldKind<'a> {
     Other,
     Option(&'a syn::Type),
     Vec(&'a syn::Type),
-}
-
-enum FieldAttrKind<'a> {
-    Generic,
-    Plural { each: &'a str },
 }
 
 fn extract_path_generic_param(path: &syn::TypePath) -> Option<&syn::Type> {
@@ -174,7 +170,7 @@ impl<'a> BuilderFieldInfo<'a> {
         }
     }
 
-    pub fn builder_attr(&self) -> Option<BuilderFieldAttr> {
+    pub fn builder_attr(&self) -> syn::Result<Option<BuilderFieldAttr>> {
         let f: &syn::Field = self.0;
         for attr in &f.attrs {
             let attr_name = attr.path.get_ident().map(|s| s.to_string());
@@ -183,7 +179,7 @@ impl<'a> BuilderFieldInfo<'a> {
             }
 
             let Some(meta) = attr.parse_meta().ok() else { continue; };
-            let syn::Meta::List(meta_list) = meta else { continue; };
+            let syn::Meta::List(meta_list) = &meta else { continue; };
             let Some(attr_name) = meta_list.path.get_ident() else { continue; };
             if attr_name.to_string() != "builder" {
                 continue;
@@ -192,13 +188,16 @@ impl<'a> BuilderFieldInfo<'a> {
             let Some(syn::NestedMeta::Meta(syn::Meta::NameValue(name_value))) = meta_list.nested.first() else { continue; };
             let Some(name) = name_value.path.get_ident() else { continue; };
             if name.to_string() != "each" {
-                continue;
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "expected `builder(each = \"...\")`",
+                ));
             }
             let syn::Lit::Str(s) = &name_value.lit else { continue; };
 
-            return Some(BuilderFieldAttr { each: s.value() });
+            return Ok(Some(BuilderFieldAttr { each: s.value() }));
         }
-        None
+        Ok(None)
     }
 
     pub fn field_init_syntax(&self) -> proc_macro2::TokenStream {
@@ -279,8 +278,8 @@ impl<'a> BuilderFieldInfo<'a> {
                     }
                 }
             }
-            FieldKind::Vec(unwrapped_ty) => {
-                if let Some(a) = BuilderFieldInfo(f).builder_attr() {
+            FieldKind::Vec(unwrapped_ty) => match BuilderFieldInfo(f).builder_attr() {
+                Ok(Some(a)) => {
                     let method_name = Ident::new(&a.each, f.span());
 
                     quote_spanned! {f.span()=>
@@ -289,7 +288,8 @@ impl<'a> BuilderFieldInfo<'a> {
                             self
                         }
                     }
-                } else {
+                }
+                Ok(None) => {
                     quote_spanned! {f.span()=>
                         fn #name(&mut self, value: #ty) -> &mut Self {
                             self.#name = value;
@@ -297,7 +297,10 @@ impl<'a> BuilderFieldInfo<'a> {
                         }
                     }
                 }
-            }
+                Err(e) => {
+                    return e.to_compile_error();
+                }
+            },
         }
     }
 }
