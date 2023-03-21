@@ -2,7 +2,7 @@ use proc_macro;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 
-use syn::{parse_macro_input, Data, DeriveInput};
+use syn::{parse_macro_input, Data, DeriveInput, Lit, LitStr};
 
 struct Foo<'a> {
     name: &'a str,
@@ -22,17 +22,19 @@ impl<'a> ::std::fmt::Debug for Foo<'a> {
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
+    let name_str = LitStr::new(&name.to_string(), name.span());
     let Data::Struct(data) = input.data else { panic!("Expected 'struct'") };
     let fields = data.fields.iter().map(|f| {
         let n = f.ident.as_ref().expect("Struct should have identifier");
+        let n_str = LitStr::new(&n.to_string(), n.span());
         quote_spanned!( f.span() =>
-            .field(stringify!(#n), &self.#n)
+            .field(#n_str, &self.#n)
         )
     });
     let result: proc_macro2::TokenStream = quote!(
         impl ::std::fmt::Debug for #name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct(stringify!(#name))
+                f.debug_struct(#name_str)
                     #( #fields )*
                 .finish()
             }
