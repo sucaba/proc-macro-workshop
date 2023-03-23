@@ -3,7 +3,8 @@ use proc_macro2;
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Data, DeriveInput, Fields, GenericArgument, Ident, Index, PathArguments,
+    parse_macro_input, Data, DeriveInput, Fields, GenericArgument, Ident, Index, LitStr,
+    PathArguments,
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -172,32 +173,35 @@ impl<'a> BuilderFieldInfo<'a> {
 
     pub fn builder_attr(&self) -> syn::Result<Option<BuilderFieldAttr>> {
         let f: &syn::Field = self.0;
+        let mut result = None;
+
         for attr in &f.attrs {
-            let attr_name = attr.path.get_ident().map(|s| s.to_string());
-            if attr_name != Some("builder".to_owned()) {
+            // parse 'builder'
+            if !attr.path().is_ident("builder") {
                 continue;
             }
 
-            let Some(meta) = attr.parse_meta().ok() else { continue; };
-            let syn::Meta::List(meta_list) = &meta else { continue; };
-            let Some(attr_name) = meta_list.path.get_ident() else { continue; };
-            if attr_name.to_string() != "builder" {
-                continue;
-            }
+            // parse '('
+            attr.parse_nested_meta(|meta| {
+                // parse 'each'
+                if !meta.path.is_ident("each") {
+                    //return Err(meta.error("expected `builder(each = \"...\")`"));
+                    return Err(syn::Error::new_spanned(
+                        &attr.meta,
+                        "expected `builder(each = \"...\")`",
+                    ));
+                }
+                let value = meta.value()?; // parse '='
+                let s: LitStr = value.parse()?; // parse "..." literal
+                result = Some(BuilderFieldAttr { each: s.value() });
+                Ok(())
+            })?;
 
-            let Some(syn::NestedMeta::Meta(syn::Meta::NameValue(name_value))) = meta_list.nested.first() else { continue; };
-            let Some(name) = name_value.path.get_ident() else { continue; };
-            if name.to_string() != "each" {
-                return Err(syn::Error::new_spanned(
-                    meta,
-                    "expected `builder(each = \"...\")`",
-                ));
+            if result.is_some() {
+                break;
             }
-            let syn::Lit::Str(s) = &name_value.lit else { continue; };
-
-            return Ok(Some(BuilderFieldAttr { each: s.value() }));
         }
-        Ok(None)
+        Ok(result)
     }
 
     pub fn field_init_syntax(&self) -> proc_macro2::TokenStream {
