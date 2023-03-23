@@ -177,27 +177,22 @@ impl<'a> BuilderFieldInfo<'a> {
 
         for attr in &f.attrs {
             // parse 'builder'
-            if !attr.path().is_ident("builder") {
-                continue;
-            }
+            if attr.path().is_ident("builder") {
+                // parse '('
+                attr.parse_nested_meta(|meta| {
+                    // parse 'each'
+                    if !meta.path.is_ident("each") {
+                        return Err(syn::Error::new_spanned(
+                            &attr.meta,
+                            "expected `builder(each = \"...\")`",
+                        ));
+                    }
+                    let value = meta.value()?; // parse '='
+                    let s: LitStr = value.parse()?; // parse "..." literal
+                    result = Some(BuilderFieldAttr { each: s.value() });
+                    Ok(())
+                })?;
 
-            // parse '('
-            attr.parse_nested_meta(|meta| {
-                // parse 'each'
-                if !meta.path.is_ident("each") {
-                    //return Err(meta.error("expected `builder(each = \"...\")`"));
-                    return Err(syn::Error::new_spanned(
-                        &attr.meta,
-                        "expected `builder(each = \"...\")`",
-                    ));
-                }
-                let value = meta.value()?; // parse '='
-                let s: LitStr = value.parse()?; // parse "..." literal
-                result = Some(BuilderFieldAttr { each: s.value() });
-                Ok(())
-            })?;
-
-            if result.is_some() {
                 break;
             }
         }
