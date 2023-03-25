@@ -31,30 +31,23 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let fields = data.fields.iter().enumerate().map(|(i, f)| {
         let needs_comma = i != 0;
-        let writing_comma = if needs_comma {
+        let writing_comma = needs_comma.then(|| {
             quote!(
                 f.write_str(", ")?;
             )
-        } else {
-            quote!()
-        };
+        });
 
         let info = DebugFieldInfo(f);
         let n = info.name();
         let n_str = info.name_str();
-        if let Some(attr) = info.debug_attr().expect("unable to parse debug attr") {
-            let fmt = attr.format;
-            quote_spanned!( f.span() =>
-                #writing_comma
-                f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
-            )
-        } else {
-            let fmt = "{:?}";
-            quote_spanned!( f.span() =>
-                #writing_comma
-                f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
-            )
-        }
+        let attr = info.debug_attr().expect("unable to parse debug attr");
+        let fmt = attr
+            .map(|attr| attr.format)
+            .unwrap_or_else(|| LitStr::new("{:?}", f.span()));
+        quote_spanned!( f.span() =>
+            #writing_comma
+            f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
+        )
     });
 
     let result: proc_macro2::TokenStream = quote!(
