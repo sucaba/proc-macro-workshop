@@ -3,7 +3,10 @@ use proc_macro2;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 
-use syn::{parse_macro_input, Data, DeriveInput, Expr, ExprLit, Field, Lit, LitStr};
+use syn::{
+    parse_macro_input, parse_quote, Data, DeriveInput, Expr, ExprLit, Field, GenericParam,
+    Generics, Lit, LitStr,
+};
 
 mod use_case {
     struct Field<'a> {
@@ -50,8 +53,11 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         )
     });
 
+    let generics = add_trait_bounds(input.generics);
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
     let result: proc_macro2::TokenStream = quote!(
-        impl ::std::fmt::Debug for #name {
+        impl #impl_generics ::std::fmt::Debug for #name #ty_generics #where_clause {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(#name_str)?;
                 f.write_str(" { ")?;
@@ -62,6 +68,16 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     );
     // panic!("result = {result}");
     result.into()
+}
+
+// Add a bound `T: Debug` to every type parameter T.
+fn add_trait_bounds(mut generics: Generics) -> Generics {
+    for param in &mut generics.params {
+        if let GenericParam::Type(ref mut type_param) = *param {
+            type_param.bounds.push(parse_quote!(::std::fmt::Debug));
+        }
+    }
+    generics
 }
 
 #[derive(Debug)]
