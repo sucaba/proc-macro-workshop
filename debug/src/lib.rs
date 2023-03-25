@@ -28,35 +28,34 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let name = input.ident;
     let name_str = LitStr::new(&name.to_string(), name.span());
     let Data::Struct(data) = input.data else { panic!("Expected 'struct'") };
-    let mut fields = Vec::new();
-    let mut fields_iter = data.fields.iter().peekable();
 
-    while let Some(f) = fields_iter.next() {
+    let fields = data.fields.iter().enumerate().map(|(i, f)| {
+        let needs_comma = i != 0;
+        let writing_comma = if needs_comma {
+            quote!(
+                f.write_str(", ")?;
+            )
+        } else {
+            quote!()
+        };
+
         let info = DebugFieldInfo(f);
         let n = info.name();
         let n_str = info.name_str();
-        let mut code;
         if let Some(attr) = info.debug_attr().expect("unable to parse debug attr") {
             let fmt = attr.format;
-            code = quote_spanned!( f.span() =>
+            quote_spanned!( f.span() =>
+                #writing_comma
                 f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
-            );
+            )
         } else {
             let fmt = "{:?}";
-            code = quote_spanned!( f.span() =>
+            quote_spanned!( f.span() =>
+                #writing_comma
                 f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
-            );
+            )
         }
-
-        let needs_comma = fields_iter.peek().is_some();
-        if needs_comma {
-            code = quote!(
-                #code;
-                f.write_str(", ")?;
-            );
-        }
-        fields.push(code);
-    }
+    });
 
     let result: proc_macro2::TokenStream = quote!(
         impl ::std::fmt::Debug for #name {
