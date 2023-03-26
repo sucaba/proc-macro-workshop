@@ -1,11 +1,12 @@
 use proc_macro;
 use proc_macro2;
 use quote::{quote, quote_spanned};
+use std::collections::HashSet;
 use syn::spanned::Spanned;
 
 use syn::{
-    parse_macro_input, parse_quote, Data, DeriveInput, Expr, ExprLit, Field, GenericParam,
-    Generics, Lit, LitStr,
+    parse_macro_input, parse_quote, punctuated::Punctuated, Data, DeriveInput, Expr, ExprLit,
+    Field, Lit, LitStr, PredicateType, Token, Type, WhereClause,
 };
 
 mod use_case {
@@ -52,9 +53,15 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
         )
     });
+    let field_types = data
+        .fields
+        .iter()
+        .map(|f| &f.ty)
+        .collect::<HashSet<&Type>>();
 
-    let generics = add_trait_bounds(input.generics);
+    let generics = input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let where_clause = add_field_type_bounds(where_clause, field_types);
 
     let result: proc_macro2::TokenStream = quote!(
         impl #impl_generics ::std::fmt::Debug for #name #ty_generics #where_clause {
@@ -70,14 +77,24 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     result.into()
 }
 
-// Add a bound `T: Debug` to every type parameter T.
-fn add_trait_bounds(mut generics: Generics) -> Generics {
-    for param in &mut generics.params {
-        if let GenericParam::Type(ref mut type_param) = *param {
-            type_param.bounds.push(parse_quote!(::std::fmt::Debug));
-        }
+fn add_field_type_bounds<'a>(
+    where_clouse: Option<&WhereClause>,
+    field_types: impl IntoIterator<Item = &'a Type>,
+) -> WhereClause {
+    let mut result = where_clouse.cloned().unwrap_or_else(|| parse_quote!(where));
+    let mut bounds = Punctuated::new();
+    bounds.push(parse_quote!(::std::fmt::Debug));
+    for ty in field_types {
+        result
+            .predicates
+            .push(syn::WherePredicate::Type(PredicateType {
+                lifetimes: None,
+                bounded_ty: ty.clone(),
+                colon_token: Token![:](proc_macro2::Span::call_site()),
+                bounds: bounds.clone(),
+            }));
     }
-    generics
+    result
 }
 
 #[derive(Debug)]
