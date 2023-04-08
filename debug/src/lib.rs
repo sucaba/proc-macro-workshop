@@ -3,10 +3,12 @@ use proc_macro2;
 use quote::{quote, quote_spanned};
 use std::collections::HashSet;
 use syn::spanned::Spanned;
+use syn::GenericArgument;
 
 use syn::{
     parse_macro_input, parse_quote, punctuated::Punctuated, Data, DeriveInput, Expr, ExprLit,
-    Field, Lit, LitStr, PredicateType, Token, Type, WhereClause,
+    Field, GenericParam, Generics, Ident, Lit, LitStr, PathArguments, PredicateType, Token, Type,
+    WhereClause,
 };
 
 mod use_case {
@@ -53,15 +55,16 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
         )
     });
-    let field_types = data
+    let phantom_types = data
         .fields
         .iter()
-        .map(|f| &f.ty)
-        .collect::<HashSet<&Type>>();
+        .flat_map(|f| DebugFieldInfo::new(f).phantom_type())
+        .collect::<HashSet<_>>();
 
-    let generics = input.generics;
+    // panic!("debug_field_types = {:?}", phantom_types);
+    let generics = add_trait_bounds(input.generics, phantom_types);
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let where_clause = add_field_type_bounds(where_clause, field_types);
+    // let where_clause = add_field_type_bounds(where_clause, field_types);
 
     let result: proc_macro2::TokenStream = quote!(
         impl #impl_generics ::std::fmt::Debug for #name #ty_generics #where_clause {
@@ -75,6 +78,18 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     );
     // panic!("result = {result}");
     result.into()
+}
+
+// Add a bound `T: Debug` to every type parameter T.
+fn add_trait_bounds(mut generics: Generics, phantom_types: HashSet<&Ident>) -> Generics {
+    for param in &mut generics.params {
+        if let GenericParam::Type(ref mut type_param) = *param {
+            if !phantom_types.contains(&type_param.ident) {
+                type_param.bounds.push(parse_quote!(::std::fmt::Debug));
+            }
+        }
+    }
+    generics
 }
 
 fn add_field_type_bounds<'a>(
@@ -105,6 +120,10 @@ struct DebugFieldAttr {
 struct DebugFieldInfo<'a>(&'a Field);
 
 impl<'a> DebugFieldInfo<'a> {
+    pub fn new(field: &'a Field) -> Self {
+        Self(field)
+    }
+
     pub fn name(&self) -> &proc_macro2::Ident {
         self.0
             .ident
@@ -115,6 +134,20 @@ impl<'a> DebugFieldInfo<'a> {
     pub fn name_str(&self) -> LitStr {
         let n = self.name();
         LitStr::new(&n.to_string(), n.span())
+    }
+
+    pub fn phantom_type(&self) -> Option<&'a Ident> {
+        let Type::Path(tp) = &self.0.ty else { return None; };
+        let segm = tp.path.segments.last()?;
+        let phantom_data: Ident = parse_quote!(PhantomData);
+        if &segm.ident == &phantom_data {
+            let PathArguments::AngleBracketed(angle_brackets) = &segm.arguments else { return None; };
+            let Some(GenericArgument::Type(Type::Path(param))) = angle_brackets.args.first() else { return None; };
+            let segm = param.path.segments.last()?;
+            Some(&segm.ident)
+        } else {
+            None
+        }
     }
 
     pub fn debug_attr(&self) -> syn::Result<Option<DebugFieldAttr>> {
