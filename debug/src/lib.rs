@@ -6,9 +6,8 @@ use syn::spanned::Spanned;
 use syn::GenericArgument;
 
 use syn::{
-    parse_macro_input, parse_quote, punctuated::Punctuated, Data, DeriveInput, Expr, ExprLit,
-    Field, GenericParam, Generics, Ident, Lit, LitStr, PathArguments, PredicateType, Token, Type,
-    WhereClause,
+    parse_macro_input, parse_quote, Data, DeriveInput, Expr, ExprLit, Field, GenericParam,
+    Generics, Ident, Lit, LitStr, PathArguments, Type, TypePath,
 };
 
 mod use_case {
@@ -43,7 +42,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             )
         });
 
-        let info = DebugFieldInfo(f);
+        let info = DebugFieldInfo::new(f);
         let n = info.name();
         let n_str = info.name_str();
         let attr = info.debug_attr().expect("unable to parse debug attr");
@@ -55,14 +54,11 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             f.write_fmt(format_args!(concat!(#n_str, ": ", #fmt), self.#n))?;
         )
     });
-    let phantom_types = data
-        .fields
-        .iter()
-        .flat_map(|f| DebugFieldInfo::new(f).phantom_type())
-        .collect::<HashSet<_>>();
+    let mut bc = DebugBounds::new();
+    data.fields.iter().for_each(|f| bc.collect(&f.ty));
 
-    // panic!("debug_field_types = {:?}", phantom_types);
-    let generics = add_trait_bounds(input.generics, phantom_types);
+    // panic!("**bc = {:#?}", bc);
+    let generics = bc.apply(input.generics);
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     // let where_clause = add_field_type_bounds(where_clause, field_types);
 
@@ -80,38 +76,6 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     result.into()
 }
 
-// Add a bound `T: Debug` to every type parameter T.
-fn add_trait_bounds(mut generics: Generics, phantom_types: HashSet<&Ident>) -> Generics {
-    for param in &mut generics.params {
-        if let GenericParam::Type(ref mut type_param) = *param {
-            if !phantom_types.contains(&type_param.ident) {
-                type_param.bounds.push(parse_quote!(::std::fmt::Debug));
-            }
-        }
-    }
-    generics
-}
-
-fn add_field_type_bounds<'a>(
-    where_clouse: Option<&WhereClause>,
-    field_types: impl IntoIterator<Item = &'a Type>,
-) -> WhereClause {
-    let mut result = where_clouse.cloned().unwrap_or_else(|| parse_quote!(where));
-    let mut bounds = Punctuated::new();
-    bounds.push(parse_quote!(::std::fmt::Debug));
-    for ty in field_types {
-        result
-            .predicates
-            .push(syn::WherePredicate::Type(PredicateType {
-                lifetimes: None,
-                bounded_ty: ty.clone(),
-                colon_token: Token![:](proc_macro2::Span::call_site()),
-                bounds: bounds.clone(),
-            }));
-    }
-    result
-}
-
 #[derive(Debug)]
 struct DebugFieldAttr {
     format: LitStr,
@@ -120,7 +84,7 @@ struct DebugFieldAttr {
 struct DebugFieldInfo<'a>(&'a Field);
 
 impl<'a> DebugFieldInfo<'a> {
-    pub fn new(field: &'a Field) -> Self {
+    fn new(field: &'a Field) -> Self {
         Self(field)
     }
 
@@ -134,20 +98,6 @@ impl<'a> DebugFieldInfo<'a> {
     pub fn name_str(&self) -> LitStr {
         let n = self.name();
         LitStr::new(&n.to_string(), n.span())
-    }
-
-    pub fn phantom_type(&self) -> Option<&'a Ident> {
-        let Type::Path(tp) = &self.0.ty else { return None; };
-        let segm = tp.path.segments.last()?;
-        let phantom_data: Ident = parse_quote!(PhantomData);
-        if &segm.ident == &phantom_data {
-            let PathArguments::AngleBracketed(angle_brackets) = &segm.arguments else { return None; };
-            let Some(GenericArgument::Type(Type::Path(param))) = angle_brackets.args.first() else { return None; };
-            let segm = param.path.segments.last()?;
-            Some(&segm.ident)
-        } else {
-            None
-        }
     }
 
     pub fn debug_attr(&self) -> syn::Result<Option<DebugFieldAttr>> {
@@ -165,5 +115,139 @@ impl<'a> DebugFieldInfo<'a> {
         return Ok(Some(DebugFieldAttr {
             format: lit.clone(),
         }));
+    }
+}
+
+trait TypeVisitor<'a> {
+    fn visit_phantom_type(&mut self, ident: &'a TypePath);
+    fn visit_associated_type(&mut self, path: &'a TypePath);
+    fn visit_generic_type(&mut self, path: &'a TypePath, args: Vec<&'a Type>);
+    fn visit_non_generic_type(&mut self, path: &'a TypePath);
+
+    //fn dispatch_generic_type(&mut self, );
+
+    fn dispatch(&mut self, ty: &'a Type) {
+        match ty {
+            Type::Path(tp) => {
+                if tp.path.segments.len() == 1 {
+                    let is_phantom_data = tp
+                        .path
+                        .segments
+                        .first()
+                        .map(|sg| sg.ident == "PhantomData")
+                        .unwrap_or(false);
+                    // panic!("tp.path={:#?} is phantom={}", tp.path, is_phantom_data);
+                    if is_phantom_data {
+                        self.visit_phantom_type(tp);
+                    } else {
+                        if let Some(args) = generic_type_args(tp) {
+                            self.visit_generic_type(tp, args);
+                        } else {
+                            self.visit_non_generic_type(tp);
+                        }
+                    }
+                } else {
+                    self.visit_associated_type(tp);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn generic_type_args(tp: &TypePath) -> Option<Vec<&Type>> {
+    let Some(segm) = tp.path.segments.last() else { return None; };
+    let PathArguments::AngleBracketed(angle_bracketed)
+        = &segm.arguments
+        else { return None; };
+    let mut result = Vec::new();
+    for arg in &angle_bracketed.args {
+        let GenericArgument::Type(ty)
+            = arg
+            else { continue; };
+        result.push(ty);
+    }
+
+    Some(result)
+}
+
+fn first_generic_arg(tp: &TypePath) -> Option<&Ident> {
+    let Some(segm) = tp.path.segments.last() else { return None; };
+    let PathArguments::AngleBracketed(angle_bracketed)
+        = &segm.arguments
+        else { return None; };
+    let Some(GenericArgument::Type(Type::Path(param)))
+        = angle_bracketed.args.first()
+        else { return None; };
+    let Some(ident) = param.path.get_ident() else { return None; };
+    Some(ident)
+}
+
+#[derive(Debug)]
+struct DebugBounds<'a> {
+    phantom_generic_types: HashSet<&'a Ident>,
+    associated_types: HashSet<&'a TypePath>,
+    used_generic_types: HashSet<&'a Ident>, // Non-generic
+}
+
+impl<'a> DebugBounds<'a> {
+    fn new() -> Self {
+        Self {
+            phantom_generic_types: HashSet::new(),
+            used_generic_types: HashSet::new(),
+            associated_types: HashSet::new(),
+        }
+    }
+
+    fn collect(&mut self, ty: &'a Type) {
+        self.dispatch(ty)
+    }
+
+    // Add a bound `T: Debug` to every type parameter T.
+    fn apply(&mut self, mut generics: Generics) -> Generics {
+        for param in &mut generics.params {
+            if let GenericParam::Type(ref mut type_param) = *param {
+                if self.used_generic_types.contains(&type_param.ident)
+                    && !self.phantom_generic_types.contains(&type_param.ident)
+                {
+                    type_param.bounds.push(parse_quote!(::std::fmt::Debug));
+                }
+            }
+        }
+        let w = generics.make_where_clause();
+        for t in &self.associated_types {
+            w.predicates.push(parse_quote!(#t : ::std::fmt::Debug));
+        }
+        generics
+    }
+}
+
+impl<'a> Default for DebugBounds<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> TypeVisitor<'a> for DebugBounds<'a> {
+    fn visit_phantom_type(&mut self, tp: &'a TypePath) {
+        if let Some(ident) = first_generic_arg(tp) {
+            self.phantom_generic_types.insert(ident);
+        }
+    }
+
+    fn visit_associated_type(&mut self, path: &'a TypePath) {
+        self.associated_types.insert(path);
+    }
+
+    fn visit_non_generic_type(&mut self, path: &'a TypePath) {
+        if let Some(ident) = path.path.get_ident() {
+            self.used_generic_types.insert(ident);
+        }
+    }
+
+    fn visit_generic_type(&mut self, _path: &'a TypePath, args: Vec<&'a Type>) {
+        for arg in args {
+            self.dispatch(arg);
+        }
     }
 }
