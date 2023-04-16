@@ -29,7 +29,15 @@ mod use_case {
 
 #[proc_macro_derive(CustomDebug, attributes(debug))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+    let mut input = parse_macro_input!(input as DeriveInput);
+    let bound = match input.debug_struct_attr() {
+        Ok(Some(v)) => Some(v.bound),
+        Ok(None) => None,
+        Err(e) => {
+            return e.to_compile_error().into();
+        }
+    };
+
     let name = input.ident;
     let name_str = LitStr::new(&name.to_string(), name.span());
     let Data::Struct(data) = input.data else { panic!("Expected 'struct'") };
@@ -57,8 +65,15 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut bc = DebugBounds::new();
     data.fields.iter().for_each(|f| bc.collect(&f.ty));
 
+    let generics;
     // panic!("**bc = {:#?}", bc);
-    let generics = bc.apply(input.generics);
+    let wc = input.generics.make_where_clause();
+    if let Some(bound) = bound {
+        wc.predicates.push(syn::parse_str(&bound).unwrap());
+        generics = input.generics;
+    } else {
+        generics = bc.apply(input.generics);
+    }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     // let where_clause = add_field_type_bounds(where_clause, field_types);
 
@@ -74,6 +89,34 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     );
     // panic!("result = {result}");
     result.into()
+}
+
+#[derive(Debug)]
+struct DebugStructAttr {
+    pub bound: String,
+}
+
+trait HasStructDebugAttr {
+    fn debug_struct_attr(&self) -> syn::Result<Option<DebugStructAttr>>;
+}
+
+impl HasStructDebugAttr for DeriveInput {
+    fn debug_struct_attr(&self) -> syn::Result<Option<DebugStructAttr>> {
+        let Some(l) = self.attrs.iter().find_map(|a| {
+            let Ok(l) = a.meta.require_list() else { return None; };
+            l.path.is_ident("debug").then_some(l)
+        }) else { return Ok(None); };
+
+        let mut result = None;
+        l.parse_nested_meta(|meta| {
+            if meta.path.is_ident("bound") {
+                let v: LitStr = meta.value()?.parse()?;
+                result = Some(DebugStructAttr { bound: v.value() });
+            }
+            Ok(())
+        })?;
+        Ok(result)
+    }
 }
 
 #[derive(Debug)]
